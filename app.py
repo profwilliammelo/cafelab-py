@@ -124,18 +124,6 @@ def carregar_dados_v5():
     except:
         pass # Ignora erro de secrets se não existir (ambiente local)
         
-    if not credentials:
-        if os.path.exists(ARQUIVO_CREDENCIAIS):
-            credentials = Credentials.from_service_account_file(
-                ARQUIVO_CREDENCIAIS, scopes=scopes
-            )
-        else:
-            st.error("❌ Credenciais não encontradas! Configure 'st.secrets' (Cloud) ou 'service_account.json' (Local).")
-            st.stop()
-            
-    client = gspread.authorize(credentials)
-    lista_dfs = []
-    prog_bar = st.progress(0)
 
     # 3. Loop de Leitura das Planilhas
     for i, (turma, sheet_id) in enumerate(IDS_PLANILHAS.items()):
