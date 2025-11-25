@@ -103,39 +103,6 @@ def normalizar_nome(x):
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
     return "".join(c for c in text if c.isalnum() or c.isspace()).strip()
 
-# ==============================================================================
-# 3. CARREGAMENTO E PROCESSAMENTO DE DADOS
-# ==============================================================================
-# Mudei o nome da função para 'v5' para forçar o Streamlit a ignorar caches antigos e quebrados
-@st.cache_data(ttl=60) 
-def carregar_dados_v5():
-    # 1. Verificação de Arquivo
-    if not os.path.exists(ARQUIVO_CREDENCIAIS):
-        st.error(f"Arquivo de credenciais não encontrado: {ARQUIVO_CREDENCIAIS}")
-        st.stop()
-        
-    # 2. Autenticação Manual (Corrige quebras de linha na chave)
-    try:
-        with open(ARQUIVO_CREDENCIAIS, "r", encoding="utf-8") as f:
-            creds_info = json.load(f)
-            
-        # Garante que as quebras de linha na chave privada estejam corretas
-        if "private_key" in creds_info:
-            creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
-            
-        creds = Credentials.from_service_account_info(creds_info, 
-            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-        
-        client = gspread.authorize(creds)
-        
-    except Exception as e:
-        st.error("❌ Falha Crítica na Autenticação.")
-        st.warning(f"Detalhes: {e}")
-        st.stop()
-    
-    lista_dfs = [] 
-    prog_bar = st.progress(0)
-    
     # 3. Loop de Leitura das Planilhas
     for i, (turma, sheet_id) in enumerate(IDS_PLANILHAS.items()):
         try:
