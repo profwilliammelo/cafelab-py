@@ -103,6 +103,21 @@ def normalizar_nome(x):
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
     return "".join(c for c in text if c.isalnum() or c.isspace()).strip()
 
+
+@st.cache_data(ttl=600)
+def carregar_dados_v5():
+    # Configuração da Autenticação do Google Sheets
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    credentials = Credentials.from_service_account_file(
+        ARQUIVO_CREDENCIAIS, scopes=scopes
+    )
+    client = gspread.authorize(credentials)
+    lista_dfs = []
+    prog_bar = st.progress(0)
+
     # 3. Loop de Leitura das Planilhas
     for i, (turma, sheet_id) in enumerate(IDS_PLANILHAS.items()):
         try:
