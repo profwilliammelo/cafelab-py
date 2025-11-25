@@ -1,0 +1,14 @@
+# Secrets
+service_account.json
+
+# Data
+dados_turmas_2025.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.streamlit/secrets.toml
