@@ -83,6 +83,7 @@ MAPA_INDICADORES = {
     "quizz1": "Quizz 1", "quizz2": "Quizz 2", "quizz3": "Quizz 3",
     "quizz": "Quizz – Total",
     "atividade_ucs": "Atividade UCs", "atividade_folha": "Atividade (Folha)",
+
     "memorias_quilombo": "Memórias do Quilombo", "maquete": "Maquete",
     "atividade_passeio": "Atividade do Passeio",
     "fez_quizz1": "Fez Quizz 1", "fez_quizz2": "Fez Quizz 2",
@@ -111,9 +112,27 @@ def carregar_dados_v5():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    credentials = Credentials.from_service_account_file(
-        ARQUIVO_CREDENCIAIS, scopes=scopes
-    )
+    
+    # Autenticação: Secrets (Cloud) ou Arquivo Local (Dev)
+    credentials = None
+    
+    try:
+        if "gsheets" in st.secrets:
+            credentials = Credentials.from_service_account_info(
+                st.secrets["gsheets"], scopes=scopes
+            )
+    except:
+        pass # Ignora erro de secrets se não existir (ambiente local)
+        
+    if not credentials:
+        if os.path.exists(ARQUIVO_CREDENCIAIS):
+            credentials = Credentials.from_service_account_file(
+                ARQUIVO_CREDENCIAIS, scopes=scopes
+            )
+        else:
+            st.error("❌ Credenciais não encontradas! Configure 'st.secrets' (Cloud) ou 'service_account.json' (Local).")
+            st.stop()
+            
     client = gspread.authorize(credentials)
     lista_dfs = []
     prog_bar = st.progress(0)
@@ -201,39 +220,51 @@ def carregar_dados_v5():
     df_final = df_long
     df_final["turma"] = df_final["turma"].astype(str)
     
-    if os.path.exists(ARQUIVO_CONTEXTO):
-        try:
-            df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='utf-8')
-        except:
-            try:
-                df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='latin-1')
-            except:
-                df_ctx = pd.DataFrame()
-            
-        if not df_ctx.empty:
-            df_ctx.columns = [str(c).lower().strip() for c in df_ctx.columns]
-            
-            df_ctx["chave_estudante"] = df_ctx["nome_estudante"].apply(normalizar_nome)
-            df_ctx["turma"] = df_ctx["turma"].astype(str)
-            
-            df_final["chave_estudante"] = df_final["nome_estudante"].apply(normalizar_nome)
-            
-            cols_drop = [c for c in ["nome_estudante", "tipoindicador", "bimestre"] if c in df_ctx.columns]
-            df_ctx_clean = df_ctx.drop(columns=cols_drop)
-            
-            df_merged = pd.merge(df_final, df_ctx_clean, on=["chave_estudante", "turma"], how="left")
-            
-            # Recuperação de Colunas Perdidas
-            if "turma" in df_merged.columns:
-                df_final = df_merged
-            elif "turma_x" in df_merged.columns:
-                df_merged = df_merged.rename(columns={"turma_x": "turma"})
-                df_final = df_merged
-            
-            if "tipoindicador" not in df_final.columns and "tipoindicador_x" in df_final.columns:
-                df_final = df_final.rename(columns={"tipoindicador_x": "tipoindicador"})
+    # Leitura do Contexto (Google Sheets ou CSV Local)
+    ID_CONTEXTO = "1iR5M6PKHGDyoKUMEXFSWHxKCSUPBamREQ7J1es"
+    df_ctx = pd.DataFrame()
 
-            df_final = df_final.drop(columns=["chave_estudante"], errors='ignore')
+    try:
+        # Tenta ler do Google Sheets
+        sh_ctx = client.open_by_key(ID_CONTEXTO)
+        ws_ctx = sh_ctx.get_worksheet(0)
+        data_ctx = ws_ctx.get_all_records()
+        df_ctx = pd.DataFrame(data_ctx)
+    except Exception as e:
+        # Se falhar, tenta local
+        if os.path.exists(ARQUIVO_CONTEXTO):
+            try:
+                df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='utf-8')
+            except:
+                try:
+                    df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='latin-1')
+                except:
+                    pass
+    
+    if not df_ctx.empty:
+        df_ctx.columns = [str(c).lower().strip() for c in df_ctx.columns]
+        
+        df_ctx["chave_estudante"] = df_ctx["nome_estudante"].apply(normalizar_nome)
+        df_ctx["turma"] = df_ctx["turma"].astype(str)
+        
+        df_final["chave_estudante"] = df_final["nome_estudante"].apply(normalizar_nome)
+        
+        cols_drop = [c for c in ["nome_estudante", "tipoindicador", "bimestre"] if c in df_ctx.columns]
+        df_ctx_clean = df_ctx.drop(columns=cols_drop)
+        
+        df_merged = pd.merge(df_final, df_ctx_clean, on=["chave_estudante", "turma"], how="left")
+        
+        # Recuperação de Colunas Perdidas
+        if "turma" in df_merged.columns:
+            df_final = df_merged
+        elif "turma_x" in df_merged.columns:
+            df_merged = df_merged.rename(columns={"turma_x": "turma"})
+            df_final = df_merged
+        
+        if "tipoindicador" not in df_final.columns and "tipoindicador_x" in df_final.columns:
+            df_final = df_final.rename(columns={"tipoindicador_x": "tipoindicador"})
+
+        df_final = df_final.drop(columns=["chave_estudante"], errors='ignore')
             
     # 6. Cálculos Finais (COM CORREÇÃO DE PONTO/VÍRGULA)
     def clean_number(x):
@@ -331,7 +362,7 @@ def carregar_dados_v5():
                 return val / 100
         
         return val
-
+    
     if not df_final.empty and "Valor" in df_final.columns:
         df_final["Valor"] = df_final.apply(corrigir_escala_row, axis=1)
 
@@ -366,10 +397,6 @@ def status_cor(valor, indicador, bimestre):
     if not chave: return "secondary" # Se não for nota de avaliação, não colore
     
     mx = MAXIMOS.get(bimestre, {}).get(chave, 10)
-    
-    # Regras do R:
-    # Ruim (Danger) se for menor que 50% do máximo
-    # Bom (Success) se for maior ou igual a 80% do máximo
     
     if valor < (mx * 0.5): return "danger"
     if valor >= (mx * 0.8): return "success"
