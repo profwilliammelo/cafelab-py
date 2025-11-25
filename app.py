@@ -116,14 +116,34 @@ def carregar_dados_v5():
     # Autenticação: Secrets (Cloud) ou Arquivo Local (Dev)
     credentials = None
     
+    # 1. Tenta via Secrets (Streamlit Cloud)
     try:
         if "gsheets" in st.secrets:
             credentials = Credentials.from_service_account_info(
                 st.secrets["gsheets"], scopes=scopes
             )
     except:
-        pass # Ignora erro de secrets se não existir (ambiente local)
+        pass
         
+    # 2. Se não achou no secrets, tenta arquivo local
+    if not credentials:
+        if os.path.exists(ARQUIVO_CREDENCIAIS):
+            try:
+                credentials = Credentials.from_service_account_file(
+                    ARQUIVO_CREDENCIAIS, scopes=scopes
+                )
+            except Exception as e:
+                st.error(f"Erro ao ler arquivo de credenciais local: {e}")
+                st.stop()
+    
+    if not credentials:
+        st.error("Credenciais não encontradas. Configure o secrets (Cloud) ou o arquivo service_account.json (Local).")
+        st.stop()
+
+    client = gspread.authorize(credentials)
+    
+    lista_dfs = []
+    prog_bar = st.progress(0)
 
     # 3. Loop de Leitura das Planilhas
     for i, (turma, sheet_id) in enumerate(IDS_PLANILHAS.items()):
@@ -151,7 +171,7 @@ def carregar_dados_v5():
             st.warning(f"Aviso: Não consegui ler a turma {turma}. Erro: {e}")
             
         prog_bar.progress((i + 1) / len(IDS_PLANILHAS))
-            
+
     if not lista_dfs:
         st.error("Nenhuma planilha carregada.")
         st.stop()
