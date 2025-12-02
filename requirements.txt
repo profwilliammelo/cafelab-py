@@ -4,3 +4,5 @@ numpy
 plotly
 gspread
 google-auth
+fpdf2
+matplotlib
