@@ -1,4 +1,5 @@
 import streamlit as st
+# Force reload
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -8,6 +9,11 @@ from google.auth.exceptions import RefreshError, TransportError
 import os
 import json
 import unicodedata
+from fpdf import FPDF
+import matplotlib.pyplot as plt
+import io
+import zipfile
+import tempfile
 
 # ==============================================================================
 # 0. CONFIGURAÇÃO DE CAMINHOS
@@ -25,6 +31,23 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ==============================================================================
+# 1.1 AUTENTICAÇÃO
+# ==============================================================================
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("🔒 Acesso Restrito")
+    token = st.text_input("Insira o Token de Acesso", type="password")
+    if st.button("Entrar"):
+        if token == "lucio2025":
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Token inválido.")
+    st.stop()
 
 # Estilo Visual (CSS)
 st.markdown("""
@@ -95,6 +118,14 @@ IDS_PLANILHAS = {
 
 NIVEL_BIMESTRE = ["1º Bimestre", "2º Bimestre", "3º Bimestre", "4º Bimestre"]
 
+INDICADORES_DESEJADOS = [
+    "AV1 – Nota Final", "AV1 – Média Percentual",
+    "AV2 – Nota Final", "AV2 – Média Percentual",
+    "AV3 – Nota Final", "AV3 – Média Percentual",
+    "Percentual de Presenças",
+    "Nota Global", "Nota Global Acumulada"
+]
+
 MAXIMOS = {
     "1º Bimestre": {"AV1": 5, "AV2": 5, "AV3": 10, "Nota Global": 20, "Nota Global Acumulada": 20},
     "2º Bimestre": {"AV1": 5, "AV2": 5, "AV3": 10, "Nota Global": 20, "Nota Global Acumulada": 40},
@@ -103,10 +134,8 @@ MAXIMOS = {
 }
 
 LIMITES_RUINS = {
-    "1º Bimestre": {"AV1": 2.5, "AV2": 2.5, "AV3": 5},
-    "2º Bimestre": {"AV1": 2.5, "AV2": 2.5, "AV3": 5},
-    "3º Bimestre": {"AV1": 2.5, "AV2": 5,   "AV3": 7.5},
-    "4º Bimestre": {"AV1": 2.5, "AV2": 5,   "AV3": 7.5},
+    "Nota Global": 0.5, # 50% da nota máxima
+    "Percentual de Presenças": 0.75 # 75% de presença
 }
 
 MAPA_INDICADORES = {
@@ -170,9 +199,134 @@ def normalizar_nome(x):
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
     return "".join(c for c in text if c.isalnum() or c.isspace()).strip()
 
-# ==============================================================================
-# 3. CARREGAMENTO DE DADOS
-# ==============================================================================
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, 'Relatório de Desempenho do Estudante', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
+
+def gerar_pdf_aluno(nome_aluno, turma, df_aluno, comentarios=""):
+    def clean_text(text):
+        if not isinstance(text, str): return str(text)
+        # Replace common problematic characters
+        text = text.replace("–", "-").replace("—", "-").replace("“", '"').replace("”", '"')
+        # Normalize to latin-1 compatible
+        return unicodedata.normalize('NFKD', text).encode('latin-1', 'ignore').decode('latin-1')
+
+    pdf = PDF()
+    pdf.add_page()
+    
+    # Info Aluno
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, f"Nome: {clean_text(nome_aluno)}", 0, 1)
+    pdf.cell(0, 10, f"Turma: {clean_text(turma)}", 0, 1)
+    pdf.ln(5)
+    
+    # Tabela de Indicadores (Carousel Data)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, clean_text("Resumo dos Bimestres"), 0, 1)
+    pdf.set_font("Arial", "", 10)
+    
+    for bim in NIVEL_BIMESTRE:
+        row = df_aluno[df_aluno["bimestre"] == bim]
+        if not row.empty:
+            data = row.iloc[0]
+            pdf.set_font("Arial", "B", 11)
+            pdf.cell(0, 10, clean_text(bim), 0, 1)
+            pdf.set_font("Arial", "", 10)
+            
+            # Print indicators
+            for k in INDICADORES_DESEJADOS:
+                if k in data and pd.notna(data[k]):
+                    # Format value
+                    v = data[k]
+                    val_str = str(v)
+                    try: val_str = f"{float(v):.1f}"
+                    except: pass
+                    
+                    pdf.cell(0, 6, f"{clean_text(k)}: {clean_text(val_str)}", 0, 1)
+            pdf.ln(2)
+            
+    pdf.ln(5)
+    
+    # SDQ / GAD-7
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, clean_text("Avaliação Psicossocial"), 0, 1)
+    pdf.set_font("Arial", "", 10)
+    
+    sdq_val = "-"
+    gad_val = "-"
+    
+    # Heuristic search for columns
+    cols = df_aluno.columns
+    sdq_col = next((c for c in cols if "sdq" in c.lower() and "total" in c.lower()), None)
+    gad_col = next((c for c in cols if "gad" in c.lower() and "total" in c.lower()), None)
+    
+    if not df_aluno.empty:
+        if sdq_col: sdq_val = str(df_aluno.iloc[0][sdq_col])
+        if gad_col: gad_val = str(df_aluno.iloc[0][gad_col])
+        
+    pdf.cell(0, 6, f"SDQ Total: {clean_text(sdq_val)}", 0, 1)
+    pdf.cell(0, 6, f"GAD-7 Total: {clean_text(gad_val)}", 0, 1)
+    pdf.ln(5)
+    
+    # Comentarios
+    if comentarios:
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, clean_text("Comentários"), 0, 1)
+        pdf.set_font("Arial", "", 10)
+        pdf.multi_cell(0, 6, clean_text(comentarios))
+        pdf.ln(5)
+        
+    # Charts
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, clean_text("Gráficos de Desempenho"), 0, 1)
+    
+    # Generate charts
+    indicadores_chart = [c for c in INDICADORES_DESEJADOS if c in df_aluno.columns]
+    
+    chart_count = 0
+    for i, ind in enumerate(indicadores_chart):
+        df_ind = df_aluno[["bimestre", ind]].dropna()
+        if not df_ind.empty:
+            try:
+                df_ind[ind] = pd.to_numeric(df_ind[ind])
+                
+                plt.figure(figsize=(6, 4))
+                plt.bar(df_ind["bimestre"], df_ind[ind], color='#e95420')
+                plt.title(clean_text(ind))
+                plt.tight_layout()
+                
+                img_buf = io.BytesIO()
+                plt.savefig(img_buf, format='png')
+                plt.close()
+                
+                # Embed
+                x = 10 + (chart_count % 2) * 95
+                y = pdf.get_y()
+                
+                # Check page break
+                if y > 250:
+                    pdf.add_page()
+                    y = 20
+                    chart_count = 0 # reset for new page layout if needed, but simple grid is better
+                
+                pdf.image(img_buf, x=x, y=y, w=90)
+                
+                if chart_count % 2 == 1: pdf.ln(75) # Move down after 2nd chart
+                chart_count += 1
+                
+            except:
+                continue
+                
+    return bytes(pdf.output())
+
 @st.cache_data(ttl=600)
 def carregar_dados_v5():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -193,9 +347,10 @@ def carregar_dados_v5():
     if not credentials:
         st.error("Credenciais não encontradas.")
         st.stop()
-
+        
     client = gspread.authorize(credentials)
     lista_dfs = []
+    
     prog_bar = st.progress(0)
 
     for i, (turma, sheet_id) in enumerate(IDS_PLANILHAS.items()):
@@ -226,9 +381,6 @@ def carregar_dados_v5():
     df_bruto = pd.concat(lista_dfs, ignore_index=True)
     prog_bar.empty()
     
-    # DEBUG: Verificar colunas carregadas
-    # st.write("Colunas encontradas:", df_bruto.columns.tolist())
-    
     sufixos = {"_primeirobi": "1º Bimestre", "_segundobi": "2º Bimestre", "_terceirobi": "3º Bimestre", "_quartobi": "4º Bimestre"}
     cols_fixas = [c for c in ["nome_estudante", "turma"] if c in df_bruto.columns]
     if "turma" not in cols_fixas and "turma" in df_bruto.columns: cols_fixas.append("turma")
@@ -240,29 +392,26 @@ def carregar_dados_v5():
                 cols_para_melt.append(col)
                 break
     
-    # DEBUG: Verificar colunas para melt
-    # st.write("Colunas para melt:", cols_para_melt)
-    
     cols_para_melt = [c for c in cols_para_melt if not c.startswith("av1_c.") and "xpclassmana" not in c]
 
     df_long = df_bruto.melt(id_vars=cols_fixas, value_vars=cols_para_melt, var_name="indicador_cru", value_name="Valor")
     
     def processar_linha(row):
-        cru = row["indicador_cru"]
-        for suf, nome_bim in sufixos.items():
-            if cru.endswith(suf):
-                ind_limpo = cru.replace(suf, "")
-                nome_final = MAPA_INDICADORES.get(ind_limpo, ind_limpo.replace("_", " ").title())
-                return pd.Series([nome_final, nome_bim])
-        return pd.Series([cru, None])
+        ind_cru = row["indicador_cru"]
+        bimestre = None
+        tipo_ind = None
+        
+        for suf, bim in sufixos.items():
+            if ind_cru.endswith(suf):
+                bimestre = bim
+                tipo_ind = ind_cru.replace(suf, "")
+                break
+        
+        nome_amigavel = MAPA_INDICADORES.get(tipo_ind, tipo_ind)
+        return pd.Series([bimestre, nome_amigavel])
 
-    result = df_long.apply(processar_linha, axis=1)
-    df_long["tipoindicador"] = result[0]
-    df_long["bimestre"] = result[1]
-    df_long = df_long.drop(columns=["indicador_cru"])
-    
-    df_final = df_long
-    df_final["turma"] = df_final["turma"].astype(str)
+    df_long[["bimestre", "tipoindicador"]] = df_long.apply(processar_linha, axis=1)
+    df_final = df_long.drop(columns=["indicador_cru"])
     
     ID_CONTEXTO = "1iR5M6PKHGDyoKUMEXFSWHxKCSUPBamREQ7J1es"
     df_ctx = pd.DataFrame()
@@ -510,6 +659,57 @@ elif page == "Individual":
         
     with c2: aluno_sel = st.selectbox("Estudante", sorted(alunos_list))
     
+    # --- PDF GENERATION UI ---
+    st.markdown("---")
+    st.subheader("📄 Geração de Relatórios")
+    
+    col_pdf1, col_pdf2 = st.columns([2, 1])
+    
+    with col_pdf1:
+        comentarios_pdf = st.text_area("Comentários Gerais para o Relatório (Opcional)", height=100)
+        
+    with col_pdf2:
+        modo_lote = st.checkbox("Gerar em Lote (Toda a Turma)")
+        
+        if not modo_lote:
+            if st.button("Gerar PDF Individual"):
+                with st.spinner("Gerando PDF..."):
+                    df_al_pdf = df_larga[df_larga["nome_estudante"] == aluno_sel]
+                    pdf_bytes = gerar_pdf_aluno(aluno_sel, turma_ind, df_al_pdf, comentarios_pdf)
+                    st.download_button(
+                        label="📥 Baixar PDF",
+                        data=pdf_bytes,
+                        file_name=f"Relatorio_{aluno_sel}.pdf",
+                        mime="application/pdf"
+                    )
+        else:
+            # Batch Mode
+            alunos_lote = st.multiselect("Selecione os alunos", sorted(alunos_list), default=sorted(alunos_list))
+            if st.button("Gerar PDFs em Lote"):
+                if not alunos_lote:
+                    st.warning("Selecione pelo menos um aluno.")
+                else:
+                    progress_text = "Gerando relatórios..."
+                    my_bar = st.progress(0, text=progress_text)
+                    
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                        for i, aluno in enumerate(alunos_lote):
+                            df_al_pdf = df_larga[df_larga["nome_estudante"] == aluno]
+                            pdf_bytes = gerar_pdf_aluno(aluno, turma_ind, df_al_pdf, comentarios_pdf)
+                            zip_file.writestr(f"Relatorio_{aluno}.pdf", pdf_bytes)
+                            my_bar.progress((i + 1) / len(alunos_lote), text=f"Gerando {aluno}...")
+                            
+                    my_bar.empty()
+                    st.success("Relatórios gerados com sucesso!")
+                    st.download_button(
+                        label="📥 Baixar ZIP com Relatórios",
+                        data=zip_buffer.getvalue(),
+                        file_name=f"Relatorios_{turma_ind}.zip",
+                        mime="application/zip"
+                    )
+    st.markdown("---")
+    
     st.subheader("Boletim (Carrossel)")
     df_al = df_larga[df_larga["nome_estudante"] == aluno_sel]
     
@@ -522,14 +722,6 @@ elif page == "Individual":
             return f"{float(v):.1f}"
         except:
             return str(v)
-
-    INDICADORES_DESEJADOS = [
-        "AV1 – Nota Final", "AV1 – Média Percentual",
-        "AV2 – Nota Final", "AV2 – Média Percentual",
-        "AV3 – Nota Final", "AV3 – Média Percentual",
-        "Percentual de Presenças",
-        "Nota Global", "Nota Global Acumulada"
-    ]
 
     cards_html = '<div class="carousel-container">'
 
