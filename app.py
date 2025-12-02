@@ -1,20 +1,18 @@
-import streamlit as st  # Biblioteca principal para criar o Web App
-import pandas as pd     # A 'Excel' do Python: manipula tabelas e dados
-import numpy as np      # Biblioteca matemática (cálculos numéricos rápidos)
-import plotly.express as px  # Cria gráficos interativos de forma fácil
-import gspread          # Conecta especificamente com o Google Sheets
-from google.oauth2.service_account import Credentials # Gerencia a segurança/login do Google
-from google.auth.exceptions import RefreshError, TransportError # Tratamento de erros de autenticação
-import os               # Permite interagir com o sistema operacional (pastas, arquivos)
-import json             # Para ler e corrigir o arquivo de senha se necessário
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import gspread
+from google.oauth2.service_account import Credentials
+from google.auth.exceptions import RefreshError, TransportError
+import os
+import json
+import unicodedata
 
 # ==============================================================================
-# 0. CONFIGURAÇÃO DE CAMINHOS (IMPORTANTE!)
+# 0. CONFIGURAÇÃO DE CAMINHOS
 # ==============================================================================
-# Define o diretório base como a pasta onde este arquivo app.py está salvo
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Montamos o caminho completo para os arquivos
 ARQUIVO_CREDENCIAIS = os.path.join(BASE_DIR, "service_account.json")
 ARQUIVO_CONTEXTO = os.path.join(BASE_DIR, "dados_turmas_2025.csv")
 
@@ -35,14 +33,52 @@ st.markdown("""
     h1, h2, h3 { color: #e95420; font-family: 'Segoe UI', sans-serif; }
     .stButton>button { background-color: #e95420; color: white; border-radius: 6px; border: none; }
     .stButton>button:hover { background-color: #d04312; color: white; }
-    .cafe-card {
-        background-color: white; padding: 15px; border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-left: 5px solid #777; margin-bottom: 10px;
+    
+    /* Carousel Styles */
+    .carousel-container {
+        display: flex;
+        overflow-x: auto;
+        gap: 20px;
+        padding: 20px 5px;
+        scroll-behavior: smooth;
+        -webkit-overflow-scrolling: touch;
+        margin-bottom: 20px;
     }
+    .carousel-card {
+        min-width: 300px;
+        max-width: 320px;
+        flex: 0 0 auto;
+        background-color: white;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        border-left: 6px solid #ccc;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .carousel-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+    }
+    .carousel-card h4 {
+        margin: 0 0 10px 0;
+        color: #444;
+        font-size: 1.1rem;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 5px;
+    }
+    
+    /* Status Colors */
     .status-success { border-left-color: #28a745 !important; } 
     .status-warning { border-left-color: #ffc107 !important; } 
     .status-danger { border-left-color: #dc3545 !important; }  
     .status-info { border-left-color: #17a2b8 !important; }    
+    .status-secondary { border-left-color: #ccc !important; }
+    
+    /* Scrollbar */
+    .carousel-container::-webkit-scrollbar { height: 8px; }
+    .carousel-container::-webkit-scrollbar-track { background: #f0f0f0; border-radius: 4px; }
+    .carousel-container::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+    .carousel-container::-webkit-scrollbar-thumb:hover { background: #bbb; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -59,8 +95,6 @@ IDS_PLANILHAS = {
 
 NIVEL_BIMESTRE = ["1º Bimestre", "2º Bimestre", "3º Bimestre", "4º Bimestre"]
 
-# REGRAS DE NEGÓCIO: Notas máximas por bimestre
-# Nota Global Acumulada soma os bimestres anteriores
 MAXIMOS = {
     "1º Bimestre": {"AV1": 5, "AV2": 5, "AV3": 10, "Nota Global": 20, "Nota Global Acumulada": 20},
     "2º Bimestre": {"AV1": 5, "AV2": 5, "AV3": 10, "Nota Global": 20, "Nota Global Acumulada": 40},
@@ -97,78 +131,91 @@ MAPA_INDICADORES = {
     "nota_global": "Nota Global", "nota_global_acumulada": "Nota Global Acumulada",
 }
 
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+def status_cor(valor, indicador, bimestre):
+    if pd.isna(valor): return "secondary"
+    
+    chave = "Nota Global" if "Nota Global" in indicador else \
+            "AV1" if "AV1" in indicador else \
+            "AV2" if "AV2" in indicador else \
+            "AV3" if "AV3" in indicador else None
+            
+    if not chave: return "secondary"
+    
+    mx = MAXIMOS.get(bimestre, {}).get(chave, 10)
+    
+    if valor < (mx * 0.5): return "danger"
+    if valor >= (mx * 0.8): return "success"
+    return "warning"
+
+def get_base_larga(df):
+    cols_ignorar = ["tipoindicador", "Valor"]
+    index_cols = [c for c in df.columns if c not in cols_ignorar]
+    
+    # Preencher NaNs em colunas de índice para evitar perda de linhas no pivot
+    for c in index_cols:
+        if pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = df[c].fillna(0)
+        else:
+            df[c] = df[c].fillna("")
+            
+    df_pivot = df.pivot_table(index=index_cols, columns="tipoindicador", values="Valor", aggfunc='first').reset_index()
+    return df_pivot
+
 def normalizar_nome(x):
-    import unicodedata
     if not isinstance(x, str): return ""
     text = x.lower().strip()
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
     return "".join(c for c in text if c.isalnum() or c.isspace()).strip()
 
-
+# ==============================================================================
+# 3. CARREGAMENTO DE DADOS
+# ==============================================================================
 @st.cache_data(ttl=600)
 def carregar_dados_v5():
-    # Configuração da Autenticação do Google Sheets
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
-    # Autenticação: Secrets (Cloud) ou Arquivo Local (Dev)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     credentials = None
     
-    # 1. Tenta via Secrets (Streamlit Cloud)
     try:
         if "gsheets" in st.secrets:
-            credentials = Credentials.from_service_account_info(
-                st.secrets["gsheets"], scopes=scopes
-            )
-    except:
-        pass
+            credentials = Credentials.from_service_account_info(st.secrets["gsheets"], scopes=scopes)
+    except: pass
         
-    # 2. Se não achou no secrets, tenta arquivo local
-    if not credentials:
-        if os.path.exists(ARQUIVO_CREDENCIAIS):
-            try:
-                credentials = Credentials.from_service_account_file(
-                    ARQUIVO_CREDENCIAIS, scopes=scopes
-                )
-            except Exception as e:
-                st.error(f"Erro ao ler arquivo de credenciais local: {e}")
-                st.stop()
+    if not credentials and os.path.exists(ARQUIVO_CREDENCIAIS):
+        try:
+            credentials = Credentials.from_service_account_file(ARQUIVO_CREDENCIAIS, scopes=scopes)
+        except Exception as e:
+            st.error(f"Erro credenciais locais: {e}")
+            st.stop()
     
     if not credentials:
-        st.error("Credenciais não encontradas. Configure o secrets (Cloud) ou o arquivo service_account.json (Local).")
+        st.error("Credenciais não encontradas.")
         st.stop()
 
     client = gspread.authorize(credentials)
-    
     lista_dfs = []
     prog_bar = st.progress(0)
 
-    # 3. Loop de Leitura das Planilhas
     for i, (turma, sheet_id) in enumerate(IDS_PLANILHAS.items()):
         try:
             sh = client.open_by_key(sheet_id)
             ws = sh.get_worksheet(0)
-            data = ws.get_all_records()
+            all_values = ws.get_all_values()
             
-            df_temp = pd.DataFrame(data)
-            df_temp.columns = [str(c).lower().strip() for c in df_temp.columns]
+            if not all_values: continue
+
+            headers = [str(c).lower().strip() for c in all_values[0]]
+            rows = all_values[1:]
+            df_temp = pd.DataFrame(rows, columns=headers)
+            df_temp = df_temp.loc[:, ~df_temp.columns.duplicated()]
             
-            # Remove coluna turma se vier da planilha para não duplicar
-            if 'turma' in df_temp.columns:
-                df_temp = df_temp.drop(columns=['turma'])
-                
-            # Adiciona a turma explicitamente
+            if 'turma' in df_temp.columns: df_temp = df_temp.drop(columns=['turma'])
             df_temp["turma"] = str(turma)
-            
             lista_dfs.append(df_temp)
-        
-        except RefreshError:
-            st.error(f"❌ Erro de Token (Data/Hora ou Chave) na turma {turma}.")
-            st.stop()
         except Exception as e:
-            st.warning(f"Aviso: Não consegui ler a turma {turma}. Erro: {e}")
+            st.warning(f"Erro turma {turma}: {e}")
             
         prog_bar.progress((i + 1) / len(IDS_PLANILHAS))
 
@@ -179,16 +226,9 @@ def carregar_dados_v5():
     df_bruto = pd.concat(lista_dfs, ignore_index=True)
     prog_bar.empty()
     
-    # 4. Melt (Transformação Longa)
-    sufixos = {"_primeirobi": "1º Bimestre", "_segundobi": "2º Bimestre", 
-               "_terceirobi": "3º Bimestre", "_quartobi": "4º Bimestre"}
-    
+    sufixos = {"_primeirobi": "1º Bimestre", "_segundobi": "2º Bimestre", "_terceirobi": "3º Bimestre", "_quartobi": "4º Bimestre"}
     cols_fixas = [c for c in ["nome_estudante", "turma"] if c in df_bruto.columns]
-    
-    # Garante coluna turma
-    if "turma" not in cols_fixas:
-        if "turma" in df_bruto.columns:
-            cols_fixas.append("turma")
+    if "turma" not in cols_fixas and "turma" in df_bruto.columns: cols_fixas.append("turma")
     
     cols_para_melt = []
     for col in df_bruto.columns:
@@ -197,18 +237,9 @@ def carregar_dados_v5():
                 cols_para_melt.append(col)
                 break
     
-    if not cols_para_melt:
-        st.error("Erro Crítico: Nenhuma coluna de bimestre encontrada.")
-        st.stop()
-
     cols_para_melt = [c for c in cols_para_melt if not c.startswith("av1_c.") and "xpclassmana" not in c]
 
-    df_long = df_bruto.melt(
-        id_vars=cols_fixas,       
-        value_vars=cols_para_melt,
-        var_name="indicador_cru", 
-        value_name="Valor"        
-    )
+    df_long = df_bruto.melt(id_vars=cols_fixas, value_vars=cols_para_melt, var_name="indicador_cru", value_name="Valor")
     
     def processar_linha(row):
         cru = row["indicador_cru"]
@@ -224,222 +255,104 @@ def carregar_dados_v5():
     df_long["bimestre"] = result[1]
     df_long = df_long.drop(columns=["indicador_cru"])
     
-    # 5. Merge com Contexto
     df_final = df_long
     df_final["turma"] = df_final["turma"].astype(str)
     
-    # Leitura do Contexto (Google Sheets ou CSV Local)
     ID_CONTEXTO = "1iR5M6PKHGDyoKUMEXFSWHxKCSUPBamREQ7J1es"
     df_ctx = pd.DataFrame()
 
     try:
-        # Tenta ler do Google Sheets
         sh_ctx = client.open_by_key(ID_CONTEXTO)
         ws_ctx = sh_ctx.get_worksheet(0)
-        data_ctx = ws_ctx.get_all_records()
-        df_ctx = pd.DataFrame(data_ctx)
-    except Exception as e:
-        # Se falhar, tenta local
+        df_ctx = pd.DataFrame(ws_ctx.get_all_records())
+    except:
         if os.path.exists(ARQUIVO_CONTEXTO):
-            try:
-                df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='utf-8')
-            except:
-                try:
-                    df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='latin-1')
-                except:
-                    pass
+            try: df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='utf-8')
+            except: pass
     
     if not df_ctx.empty:
         df_ctx.columns = [str(c).lower().strip() for c in df_ctx.columns]
-        
         df_ctx["chave_estudante"] = df_ctx["nome_estudante"].apply(normalizar_nome)
         df_ctx["turma"] = df_ctx["turma"].astype(str)
-        
         df_final["chave_estudante"] = df_final["nome_estudante"].apply(normalizar_nome)
         
         cols_drop = [c for c in ["nome_estudante", "tipoindicador", "bimestre"] if c in df_ctx.columns]
         df_ctx_clean = df_ctx.drop(columns=cols_drop)
-        
         df_merged = pd.merge(df_final, df_ctx_clean, on=["chave_estudante", "turma"], how="left")
         
-        # Recuperação de Colunas Perdidas
-        if "turma" in df_merged.columns:
-            df_final = df_merged
-        elif "turma_x" in df_merged.columns:
-            df_merged = df_merged.rename(columns={"turma_x": "turma"})
-            df_final = df_merged
-        
+        if "turma" in df_merged.columns: df_final = df_merged
+        elif "turma_x" in df_merged.columns: df_final = df_merged.rename(columns={"turma_x": "turma"})
         if "tipoindicador" not in df_final.columns and "tipoindicador_x" in df_final.columns:
             df_final = df_final.rename(columns={"tipoindicador_x": "tipoindicador"})
-
         df_final = df_final.drop(columns=["chave_estudante"], errors='ignore')
-            
-    # 6. Cálculos Finais (COM CORREÇÃO DE PONTO/VÍRGULA)
+
     def clean_number(x):
-        if isinstance(x, str):
-            return x.replace(',', '.')
+        if isinstance(x, str): return x.replace(',', '.')
         return x
 
     df_final["Valor"] = df_final["Valor"].apply(clean_number)
     df_final["Valor"] = pd.to_numeric(df_final["Valor"], errors="coerce")
     
-    # AV3 %
     if "tipoindicador" in df_final.columns:
         mask_av3 = df_final["tipoindicador"] == "AV3 – Nota Final"
         df_av3 = df_final[mask_av3].copy()
-        
         def calc_pct(row):
             mx = MAXIMOS.get(row["bimestre"], {}).get("AV3", 10)
             val = row["Valor"]
-            if pd.isna(val): return np.nan
-            return (val / mx) * 100 if mx > 0 else 0
-            
+            return (val / mx) * 100 if pd.notna(val) and mx > 0 else 0
         df_av3["Valor"] = df_av3.apply(calc_pct, axis=1)
         df_av3["tipoindicador"] = "AV3 – Média Percentual"
         df_final = pd.concat([df_final, df_av3], ignore_index=True)
 
-    # Normalização de Percentuais
-    INDICADORES_PERCENTUAIS = [
-        "Percentual de Presenças", "AV2 – % de Atividades Feitas",
-        "AV1 – Média Percentual", "AV2 – Média Percentual", "AV3 – Média Percentual"
-    ]
-    
+    INDICADORES_PERCENTUAIS = ["Percentual de Presenças", "AV2 – % de Atividades Feitas", "AV1 – Média Percentual", "AV2 – Média Percentual", "AV3 – Média Percentual"]
     if "tipoindicador" in df_final.columns:
         mask_pct = df_final["tipoindicador"].isin(INDICADORES_PERCENTUAIS)
-        def normalize_pct(val):
-            if pd.isna(val): return val
-            if val <= 1.05: return val * 100
-            return val
-        df_final.loc[mask_pct, "Valor"] = df_final.loc[mask_pct, "Valor"].apply(normalize_pct)
+        df_final.loc[mask_pct, "Valor"] = df_final.loc[mask_pct, "Valor"].apply(lambda x: x*100 if pd.notna(x) and x <= 1.05 else x)
 
-    # 7. Categorização SDQ / GAD
     for col in ["sdq_total", "gad7_total"]:
-        if col in df_final.columns:
-            df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
+        if col in df_final.columns: df_final[col] = pd.to_numeric(df_final[col], errors='coerce')
 
     if "sdq_total" in df_final.columns:
-        conditions = [
-            df_final["sdq_total"] <= 14,
-            df_final["sdq_total"] <= 16,
-            df_final["sdq_total"] >= 17
-        ]
-        choices = ["Normal (≤14)", "Limítrofe (15–16)", "Anormal (≥17)"]
-        df_final["sdq_total_cat"] = np.select(conditions, choices, default=None)
+        conditions = [df_final["sdq_total"] <= 14, df_final["sdq_total"] <= 16, df_final["sdq_total"] >= 17]
+        df_final["sdq_total_cat"] = np.select(conditions, ["Normal (≤14)", "Limítrofe (15–16)", "Anormal (≥17)"], default=None)
 
     if "gad7_total" in df_final.columns:
-        conditions = [
-            df_final["gad7_total"] <= 4,
-            df_final["gad7_total"] <= 9,
-            df_final["gad7_total"] <= 14,
-            df_final["gad7_total"] >= 15
-        ]
-        choices = ["Mínima (0–4)", "Leve (5–9)", "Moderada (10–14)", "Grave (15–21)"]
-        df_final["gad7_total_cat"] = np.select(conditions, choices, default=None)
+        conditions = [df_final["gad7_total"] <= 4, df_final["gad7_total"] <= 9, df_final["gad7_total"] <= 14, df_final["gad7_total"] >= 15]
+        df_final["gad7_total_cat"] = np.select(conditions, ["Mínima (0–4)", "Leve (5–9)", "Moderada (10–14)", "Grave (15–21)"], default=None)
     
-    # 8. Sanitização de Outliers (Correção de Escala por Bimestre)
     def corrigir_escala_row(row):
         val = row["Valor"]
         if pd.isna(val): return val
-        
-        bim = row["bimestre"]
-        ind = row["tipoindicador"]
-        
-        # Identifica qual regra de máximo usar (Ordem importa!)
-        chave_max = None
-        if "Nota Global Acumulada" in ind: chave_max = "Nota Global Acumulada"
-        elif "Nota Global" in ind: chave_max = "Nota Global"
-        elif "AV1" in ind and "Nota Final" in ind: chave_max = "AV1"
-        elif "AV2" in ind and "Nota Final" in ind: chave_max = "AV2"
-        elif "AV3" in ind and "Nota Final" in ind: chave_max = "AV3"
-        
-        # Se não achou chave específica, retorna original
+        bim, ind = row["bimestre"], row["tipoindicador"]
+        chave_max = "Nota Global Acumulada" if "Nota Global Acumulada" in ind else "Nota Global" if "Nota Global" in ind else "AV1" if "AV1" in ind and "Nota Final" in ind else "AV2" if "AV2" in ind and "Nota Final" in ind else "AV3" if "AV3" in ind and "Nota Final" in ind else "AV3" if "AV3" in ind and "Nota Final" in ind else None
         if not chave_max: return val
-        
-        # Busca máximo no dicionário de regras
         max_permitido = MAXIMOS.get(bim, {}).get(chave_max)
-        
         if not max_permitido: return val
-        
-        # Lógica de correção: se for maior que o teto + 10% de tolerância
         if val > max_permitido * 1.1:
-            # Tenta dividir por 10 (ex: 14.1 virou 141)
-            if (val / 10) <= max_permitido * 1.1:
-                return val / 10
-            # Tenta dividir por 100 (ex: 14.1 virou 1410)
-            elif (val / 100) <= max_permitido * 1.1:
-                return val / 100
-        
+            if (val / 10) <= max_permitido * 1.1: return val / 10
+            elif (val / 100) <= max_permitido * 1.1: return val / 100
         return val
     
-    if not df_final.empty and "Valor" in df_final.columns:
-        df_final["Valor"] = df_final.apply(corrigir_escala_row, axis=1)
-
+    df_final["Valor"] = df_final.apply(corrigir_escala_row, axis=1)
     return df_final
-
-def get_base_larga(df_long):
-    cols_fixas = ["nome_estudante", "turma", "bimestre"]
-    cols_fixas = [c for c in cols_fixas if c in df_long.columns]
-    cols_dados = ["tipoindicador", "Valor"]
-    cols_ctx = [c for c in df_long.columns if c not in cols_fixas + cols_dados]
-    
-    if "tipoindicador" not in df_long.columns:
-        return pd.DataFrame()
-
-    df_pivot = df_long.pivot_table(
-        index=cols_fixas + cols_ctx,
-        columns="tipoindicador",
-        values="Valor",
-        aggfunc="mean" 
-    ).reset_index()
-    return df_pivot
-
-def status_cor(valor, indicador, bimestre):
-    if pd.isna(valor): return "secondary"
-    
-    # Identifica qual é o indicador para buscar o máximo correto
-    chave = "Nota Global" if "Nota Global" in indicador else \
-            "AV1" if "AV1" in indicador else \
-            "AV2" if "AV2" in indicador else \
-            "AV3" if "AV3" in indicador else None
-            
-    if not chave: return "secondary" # Se não for nota de avaliação, não colore
-    
-    mx = MAXIMOS.get(bimestre, {}).get(chave, 10)
-    
-    if valor < (mx * 0.5): return "danger"
-    if valor >= (mx * 0.8): return "success"
-    return "warning"
 
 # ==============================================================================
 # 4. EXECUÇÃO PRINCIPAL
 # ==============================================================================
-
-df = pd.DataFrame()
 df_larga = pd.DataFrame()
-
 try:
     with st.spinner("Processando dados..."):
         df = carregar_dados_v5()
-        
         if df is not None and not df.empty:
-            required_cols = ['turma', 'tipoindicador']
-            missing = [c for c in required_cols if c not in df.columns]
-            
-            if missing:
-                st.error(f"Erro Crítico: Colunas obrigatórias ausentes: {missing}")
-                st.stop()
-                
             df_larga = get_base_larga(df)
         else:
             st.warning("Nenhum dado retornado.")
             st.stop()
-
 except Exception as e:
     st.error(f"Erro no carregamento: {e}")
     st.stop()
 
-if df.empty:
-    st.stop()
+if df.empty: st.stop()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -453,14 +366,14 @@ with st.sidebar:
 # --- AGREGADO ---
 if page == "Agregado":
     st.header("📊 Análise Agregada")
-    c1, c2, c3 = st.columns(3)
+    
+    # Filtros
+    c1, c2, c3, c4 = st.columns(4)
     
     lista_turmas = sorted(list(IDS_PLANILHAS.keys()))
     try:
-        if "turma" in df.columns:
-            lista_turmas = sorted(df["turma"].unique().astype(str).tolist())
-    except:
-        pass
+        if "turma" in df.columns: lista_turmas = sorted(df["turma"].unique().astype(str).tolist())
+    except: pass
         
     turmas = ["Todas"] + lista_turmas
     with c1: turma_sel = st.selectbox("Turma", turmas)
@@ -469,60 +382,76 @@ if page == "Agregado":
     idx = inds.index("Nota Global") if "Nota Global" in inds else 0
     with c2: ind_sel = st.selectbox("Indicador", inds, index=idx)
     
-    cols_ignorar = ["nome_estudante", "turma", "bimestre"] + inds
-    cols_ctx = [c for c in df_larga.columns if c not in cols_ignorar]
-    cols_cat = [c for c in cols_ctx if df_larga[c].nunique() < 15]
-    with c3: color_sel = st.selectbox("Desagregar por", ["Nenhum"] + cols_cat)
+    bims = ["Todos"] + NIVEL_BIMESTRE
+    with c3: bim_sel = st.selectbox("Bimestre", bims)
     
-    dff = pd.DataFrame()
-    if "tipoindicador" in df.columns:
-        dff = df[df["tipoindicador"] == ind_sel].copy()
+    # Identificar colunas de contexto (que não são as padrão)
+    cols_padrao = ["nome_estudante", "turma", "bimestre", "tipoindicador", "Valor", "chave_estudante", "indicador_cru", "sdq_total", "gad7_total", "sdq_total_cat", "gad7_total_cat"]
+    cols_contexto = [c for c in df.columns if c not in cols_padrao]
+    # Filtra colunas que parecem ser metadados úteis (ex: genero, raca, etc)
+    cols_contexto = sorted([c for c in cols_contexto if df[c].nunique() < 20]) # Heurística: poucas categorias
+    
+    with c4: desagregar_por = st.selectbox("Desagregar por", ["Nenhum"] + cols_contexto)
+    
+    # Filtragem
+    df_filt = df[df["tipoindicador"] == ind_sel].copy()
+    if turma_sel != "Todas": df_filt = df_filt[df_filt["turma"] == turma_sel]
+    if bim_sel != "Todos": df_filt = df_filt[df_filt["bimestre"] == bim_sel]
+    
+    if not df_filt.empty:
+        # Lógica de Plotagem Unificada
+        st.subheader(f"Análise de {ind_sel}")
+        
+        # Definição de Cores e Grupos
+        color_col = None
+        if desagregar_por != "Nenhum":
+            color_col = desagregar_por
+            
+        # 1. Gráfico de Dispersão (Pontos)
+        # Se "Todas" as turmas, fazemos facet_col="turma"
+        facet_col = "turma" if turma_sel == "Todas" else None
+        
+        fig = px.strip(
+            df_filt, 
+            x="bimestre", 
+            y="Valor", 
+            color=color_col, 
+            facet_col=facet_col, 
+            facet_col_wrap=3, 
+            stripmode="overlay", 
+            hover_data=["nome_estudante"]
+        )
+        
+        # 2. Adicionar Linhas de Média
+        # Agrupamento para média
+        grp_cols = ["bimestre"]
+        if turma_sel == "Todas": grp_cols.append("turma")
+        if color_col: grp_cols.append(color_col)
+        
+        df_media = df_filt.groupby(grp_cols)["Valor"].mean().reset_index()
+        
+        # Criar figura de linhas para extrair os traços
+        fig_lines = px.line(
+            df_media, 
+            x="bimestre", 
+            y="Valor", 
+            color=color_col, 
+            facet_col=facet_col, 
+            facet_col_wrap=3,
+            markers=True
+        )
+        
+        # Ajuste visual: Linhas pretas se não houver cor
+        if not color_col:
+            fig_lines.update_traces(line_color="black", opacity=0.7)
+            
+        # Adicionar traços de linha à figura principal
+        for trace in fig_lines.data:
+            fig.add_trace(trace)
+
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.error("Coluna 'tipoindicador' não existe.")
-        st.stop()
-    
-    if dff.empty:
-        st.warning("Sem dados.")
-        st.stop()
-
-    if turma_sel != "Todas": 
-        dff = dff[dff["turma"] == turma_sel]
-    
-    # Título Dinâmico
-    st.subheader(f"Evolução Bimestral — {ind_sel}")
-    grp = ["bimestre"]
-    if color_sel != "Nenhum": grp.append(color_sel)
-    
-    chart_data = dff.groupby(grp)["Valor"].mean().reset_index()
-    
-    fig = px.bar(chart_data, x="bimestre", y="Valor", 
-                 color=color_sel if color_sel != "Nenhum" else None,
-                 barmode="group", text_auto='.1f', 
-                 category_orders={"bimestre": NIVEL_BIMESTRE})
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("📈 Correlações")
-    numeric_cols = df_larga.select_dtypes(include=[np.number]).columns.tolist()
-    c_x, c_y = st.columns(2)
-    with c_x: 
-        idx_x = numeric_cols.index("Número de Faltas") if "Número de Faltas" in numeric_cols else 0
-        x_axis = st.selectbox("Eixo X", numeric_cols, index=idx_x)
-    with c_y: 
-        idx_y = numeric_cols.index("Nota Global") if "Nota Global" in numeric_cols else 0
-        y_axis = st.selectbox("Eixo Y", numeric_cols, index=idx_y)
-    
-    if x_axis and y_axis:
-        # Proteção contra ausência de statsmodels para não quebrar o app
-        trend_arg = None
-        try:
-            import statsmodels.api
-            trend_arg = "ols"
-        except ImportError:
-            st.warning("⚠️ Biblioteca 'statsmodels' não encontrada. O gráfico será exibido sem a linha de tendência.")
-
-        fig_s = px.scatter(df_larga, x=x_axis, y=y_axis, color="bimestre", trendline=trend_arg)
-        st.plotly_chart(fig_s, use_container_width=True)
+        st.info("Sem dados para o filtro selecionado.")
 
 # --- INDIVIDUAL ---
 elif page == "Individual":
@@ -531,10 +460,8 @@ elif page == "Individual":
     
     lista_turmas = sorted(list(IDS_PLANILHAS.keys()))
     try:
-        if "turma" in df.columns:
-            lista_turmas = sorted(df["turma"].unique().astype(str).tolist())
-    except:
-        pass
+        if "turma" in df.columns: lista_turmas = sorted(df["turma"].unique().astype(str).tolist())
+    except: pass
 
     with c1: turma_ind = st.selectbox("Turma", ["Todas"] + lista_turmas, key="t_ind")
     
@@ -544,28 +471,85 @@ elif page == "Individual":
         
     with c2: aluno_sel = st.selectbox("Estudante", sorted(alunos_list))
     
-    st.subheader("Boletim")
+    st.subheader("Boletim (Carrossel)")
     df_al = df_larga[df_larga["nome_estudante"] == aluno_sel]
     
-    cols = st.columns(4)
-    for i, bim in enumerate(NIVEL_BIMESTRE):
+    with st.expander("🔍 Ver dados brutos do estudante"):
+        st.dataframe(df_al, use_container_width=True)
+    
+    def fmt_val(v):
+        if pd.isna(v): return "-"
+        try:
+            return f"{float(v):.1f}"
+        except:
+            return str(v)
+
+    cards_html = '<div class="carousel-container">'
+
+    for bim in NIVEL_BIMESTRE:
         row = df_al[df_al["bimestre"] == bim]
-        with cols[i]:
-            st.markdown(f"**{bim}**")
-            if not row.empty:
-                val = lambda c: row.iloc[0].get(c, np.nan)
-                av1, av2, av3 = val("AV1 – Nota Final"), val("AV2 – Nota Final"), val("AV3 – Nota Final")
-                faltas = val("Número de Faltas")
-                st.markdown(f"""
-                <div class="cafe-card status-{status_cor(av3, 'AV3', bim)}">
-                    <div style="font-size:0.8rem; color:#666;">AV3</div>
-                    <div class="valor">{av3:.1f}</div>
-                    <div style="font-size:0.8rem; margin-top:5px;">
-                        AV1: <b>{av1:.1f}</b> | AV2: <b>{av2:.1f}</b><br>
-                        Faltas: {int(faltas) if pd.notna(faltas) else '-'}
-                    </div>
-                </div>""", unsafe_allow_html=True)
-            else: st.info("-")
+        
+        if not row.empty:
+            data = row.iloc[0]
+            main_val = np.nan
+            main_label = "N/A"
+            
+            if "Nota Global" in data and pd.notna(data["Nota Global"]):
+                main_val = data["Nota Global"]
+                main_label = "Nota Global"
+            elif "AV3 – Nota Final" in data and pd.notna(data["AV3 – Nota Final"]):
+                main_val = data["AV3 – Nota Final"]
+                main_label = "AV3"
+            
+            cor_card = status_cor(main_val, main_label, bim)
+            
+            summary_html = ""
+            cols_ignore = ["nome_estudante", "turma", "bimestre", "chave_estudante"]
+            if main_label == "Nota Global": cols_ignore.append("Nota Global")
+            if main_label == "AV3": cols_ignore.append("AV3 – Nota Final")
+            
+            display_keys = [
+                "Nota Global", "Nota Global Acumulada",
+                "AV1 – Nota Final", "AV2 – Nota Final", "AV3 – Nota Final",
+                "AV1 – Média Percentual", "AV2 – Média Percentual", "AV3 – Média Percentual",
+                "AV2 – % de Atividades Feitas",
+                "Número de Faltas", "Percentual de Presenças", "Número de Aulas"
+            ]
+            
+            for k in display_keys:
+                if k in data and pd.notna(data[k]) and k not in cols_ignore:
+                    val = data[k]
+                    val_str = fmt_val(val)
+                    
+                    if "Faltas" in k or "Aulas" in k:
+                        try: val_str = f"{int(float(val))}"
+                        except: pass
+                    elif "Percentual" in k or "%" in k:
+                        val_str += "%"
+                        
+                    summary_html += f"<div style='margin-bottom:4px;'>{k}: <b>{val_str}</b></div>"
+                    cols_ignore.append(k)
+
+            if not summary_html: summary_html = "<div style='color:#999; font-style:italic;'>Sem outros dados</div>"
+
+            cards_html += f"""
+            <div class="carousel-card status-{cor_card}">
+                <h4>{bim}</h4>
+                <div style="font-size:0.85rem; color:#666; margin-bottom:5px;">{main_label}</div>
+                <div class="valor" style="font-size: 2rem; font-weight: bold; color: #333; margin-bottom: 15px;">{fmt_val(main_val)}</div>
+                <div style="font-size:0.85rem; line-height:1.5; color:#555; border-top:1px solid #eee; padding-top:10px;">
+                    {summary_html}
+                </div>
+            </div>"""
+        else:
+            cards_html += f"""
+            <div class="carousel-card status-secondary">
+                <h4>{bim}</h4>
+                <div style="color:#999; font-style:italic; padding: 20px 0;">Sem dados lançados</div>
+            </div>"""
+
+    cards_html += '</div>'
+    st.markdown(cards_html, unsafe_allow_html=True)
             
     st.markdown("---")
     st.subheader("Comparativo Aluno vs Turma")
@@ -576,16 +560,18 @@ elif page == "Individual":
     df_single = df[df["nome_estudante"] == aluno_sel].copy()
     df_single["Serie"] = "Aluno"
     
-    main_inds = ["Nota Global", "Percentual de Presenças", "AV3 – Média Percentual", "SAEM – % Acertos"]
+    main_inds = ["Nota Global", "Percentual de Presenças", "AV1 – Nota Final", "AV2 – Nota Final", "AV3 – Nota Final"]
     df_comp = pd.concat([df_turma, df_single[["bimestre", "tipoindicador", "Valor", "Serie"]]])
     df_comp = df_comp[df_comp["tipoindicador"].isin(main_inds)]
     
-    fig_comp = px.line(df_comp, x="bimestre", y="Valor", color="Serie", 
-                       facet_col="tipoindicador", facet_col_wrap=2, markers=True)
-    fig_comp.update_yaxes(matches=None) 
-    st.plotly_chart(fig_comp, use_container_width=True)
-    
-# --- ATENÇÃO ---
+    if not df_comp.empty:
+        fig_comp = px.line(df_comp, x="bimestre", y="Valor", color="Serie", facet_col="tipoindicador", facet_col_wrap=2, markers=True)
+        fig_comp.update_yaxes(matches=None) 
+        st.plotly_chart(fig_comp, use_container_width=True)
+    else:
+        st.warning("Dados insuficientes para gerar o gráfico comparativo.")
+
+# --- ESTUDANTES EM ATENÇÃO ---
 elif page == "Estudantes em Atenção":
     st.header("⚠️ Estudantes em Atenção")
     st.info("Critério: Nota Global < 10 OU Presença < 75%")
