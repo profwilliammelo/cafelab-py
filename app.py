@@ -226,6 +226,9 @@ def carregar_dados_v5():
     df_bruto = pd.concat(lista_dfs, ignore_index=True)
     prog_bar.empty()
     
+    # DEBUG: Verificar colunas carregadas
+    # st.write("Colunas encontradas:", df_bruto.columns.tolist())
+    
     sufixos = {"_primeirobi": "1º Bimestre", "_segundobi": "2º Bimestre", "_terceirobi": "3º Bimestre", "_quartobi": "4º Bimestre"}
     cols_fixas = [c for c in ["nome_estudante", "turma"] if c in df_bruto.columns]
     if "turma" not in cols_fixas and "turma" in df_bruto.columns: cols_fixas.append("turma")
@@ -236,6 +239,9 @@ def carregar_dados_v5():
             if col.endswith(suf):
                 cols_para_melt.append(col)
                 break
+    
+    # DEBUG: Verificar colunas para melt
+    # st.write("Colunas para melt:", cols_para_melt)
     
     cols_para_melt = [c for c in cols_para_melt if not c.startswith("av1_c.") and "xpclassmana" not in c]
 
@@ -402,54 +408,87 @@ if page == "Agregado":
         # Lógica de Plotagem Unificada
         st.subheader(f"Análise de {ind_sel}")
         
-        # Definição de Cores e Grupos
-        color_col = None
-        if desagregar_por != "Nenhum":
-            color_col = desagregar_por
-            
-        # 1. Gráfico de Dispersão (Pontos)
         # Se "Todas" as turmas, fazemos facet_col="turma"
         facet_col = "turma" if turma_sel == "Todas" else None
         
-        fig = px.strip(
-            df_filt, 
-            x="bimestre", 
-            y="Valor", 
-            color=color_col, 
-            facet_col=facet_col, 
-            facet_col_wrap=3, 
-            stripmode="overlay", 
-            hover_data=["nome_estudante"]
-        )
-        
-        # 2. Adicionar Linhas de Média
-        # Agrupamento para média
-        grp_cols = ["bimestre"]
-        if turma_sel == "Todas": grp_cols.append("turma")
-        if color_col: grp_cols.append(color_col)
-        
-        df_media = df_filt.groupby(grp_cols)["Valor"].mean().reset_index()
-        
-        # Criar figura de linhas para extrair os traços
-        fig_lines = px.line(
-            df_media, 
-            x="bimestre", 
-            y="Valor", 
-            color=color_col, 
-            facet_col=facet_col, 
-            facet_col_wrap=3,
-            markers=True
-        )
-        
-        # Ajuste visual: Linhas pretas se não houver cor
-        if not color_col:
-            fig_lines.update_traces(line_color="black", opacity=0.7)
+        if desagregar_por == "Nenhum":
+            # --- MODO 1: SEM DESAGREGAÇÃO (PONTOS + LINHA MÉDIA NEON) ---
             
-        # Adicionar traços de linha à figura principal
-        for trace in fig_lines.data:
-            fig.add_trace(trace)
-
-        st.plotly_chart(fig, use_container_width=True)
+            # 1. Gráfico de Dispersão (Pontos)
+            fig = px.strip(
+                df_filt, 
+                x="bimestre", 
+                y="Valor", 
+                facet_col=facet_col, 
+                facet_col_wrap=3, 
+                stripmode="overlay", 
+                hover_data=["nome_estudante"]
+            )
+            
+            # 2. Adicionar Linha de Média (Neon Pink)
+            grp_cols = ["bimestre"]
+            if turma_sel == "Todas": grp_cols.append("turma")
+            
+            df_media = df_filt.groupby(grp_cols)["Valor"].mean().reset_index()
+            
+            fig_lines = px.line(
+                df_media, 
+                x="bimestre", 
+                y="Valor", 
+                facet_col=facet_col, 
+                facet_col_wrap=3,
+                markers=True
+            )
+            
+            # Estilo Neon Pink chamativo
+            fig_lines.update_traces(line_color="#FF10F0", line_width=4, opacity=1)
+            
+            for trace in fig_lines.data:
+                fig.add_trace(trace)
+                
+            st.plotly_chart(fig, use_container_width=True)
+            
+        else:
+            # --- MODO 2: COM DESAGREGAÇÃO (BARRAS + TABELA) ---
+            
+            # Agrupamento para média por grupo
+            grp_cols = ["bimestre", desagregar_por]
+            if turma_sel == "Todas": grp_cols.append("turma")
+            
+            df_media = df_filt.groupby(grp_cols)["Valor"].mean().reset_index()
+            
+            # Gráfico de Barras Agrupadas
+            fig = px.bar(
+                df_media,
+                x="bimestre",
+                y="Valor",
+                color=desagregar_por,
+                barmode="group",
+                facet_col=facet_col,
+                facet_col_wrap=3,
+                text_auto='.1f' # Rótulos numéricos visíveis
+            )
+            
+            fig.update_traces(textposition='outside', textfont_size=12)
+            fig.update_layout(yaxis_title="Valor Médio")
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Tabela de Diferença de Médias
+            st.markdown("### 📋 Tabela de Médias por Grupo")
+            
+            # Pivotar para facilitar leitura (Linhas: Turma/Bimestre, Colunas: Grupos)
+            idx_cols = ["bimestre"]
+            if turma_sel == "Todas": idx_cols.insert(0, "turma")
+            
+            df_pivot = df_media.pivot_table(
+                index=idx_cols, 
+                columns=desagregar_por, 
+                values="Valor"
+            )
+            
+            # Formatar números
+            st.dataframe(df_pivot.style.format("{:.2f}"), use_container_width=True)
     else:
         st.info("Sem dados para o filtro selecionado.")
 
@@ -484,6 +523,14 @@ elif page == "Individual":
         except:
             return str(v)
 
+    INDICADORES_DESEJADOS = [
+        "AV1 – Nota Final", "AV1 – Média Percentual",
+        "AV2 – Nota Final", "AV2 – Média Percentual",
+        "AV3 – Nota Final", "AV3 – Média Percentual",
+        "Percentual de Presenças",
+        "Nota Global", "Nota Global Acumulada"
+    ]
+
     cards_html = '<div class="carousel-container">'
 
     for bim in NIVEL_BIMESTRE:
@@ -504,91 +551,69 @@ elif page == "Individual":
             cor_card = status_cor(main_val, main_label, bim)
             
             summary_html = ""
-            cols_ignore = ["nome_estudante", "turma", "bimestre", "chave_estudante"]
-            if main_label == "Nota Global": cols_ignore.append("Nota Global")
-            if main_label == "AV3": cols_ignore.append("AV3 – Nota Final")
-            
-            display_keys = [
-                "Nota Global", "Nota Global Acumulada",
-                "AV1 – Nota Final", "AV2 – Nota Final", "AV3 – Nota Final",
-                "AV1 – Média Percentual", "AV2 – Média Percentual", "AV3 – Média Percentual",
-                "AV2 – % de Atividades Feitas",
-                "Número de Faltas", "Percentual de Presenças", "Número de Aulas"
-            ]
+            # Filtrar indicadores para o carrossel
+            display_keys = [k for k in INDICADORES_DESEJADOS if k in data.index and pd.notna(data[k])]
             
             for k in display_keys:
-                if k in data and pd.notna(data[k]) and k not in cols_ignore:
-                    val = data[k]
-                    val_str = fmt_val(val)
-                    
-                    if "Faltas" in k or "Aulas" in k:
-                        try: val_str = f"{int(float(val))}"
-                        except: pass
-                    elif "Percentual" in k or "%" in k:
-                        val_str += "%"
-                        
-                    summary_html += f"<div style='margin-bottom:4px;'>{k}: <b>{val_str}</b></div>"
-                    cols_ignore.append(k)
+                summary_html += f"<div><b>{k}:</b> {fmt_val(data[k])}</div>"
 
-            if not summary_html: summary_html = "<div style='color:#999; font-style:italic;'>Sem outros dados</div>"
-
-            cards_html += f"""
-            <div class="carousel-card status-{cor_card}">
+            cards_html += f"""<div class="carousel-card status-{cor_card}">
                 <h4>{bim}</h4>
-                <div style="font-size:0.85rem; color:#666; margin-bottom:5px;">{main_label}</div>
-                <div class="valor" style="font-size: 2rem; font-weight: bold; color: #333; margin-bottom: 15px;">{fmt_val(main_val)}</div>
-                <div style="font-size:0.85rem; line-height:1.5; color:#555; border-top:1px solid #eee; padding-top:10px;">
+                <div style="font-size: 1.4rem; font-weight: bold; color: #333; margin-bottom: 10px;">
+                    {main_label}: {fmt_val(main_val)}
+                </div>
+                <div style="font-size: 0.9rem; color: #666;">
                     {summary_html}
                 </div>
             </div>"""
         else:
-            cards_html += f"""
-            <div class="carousel-card status-secondary">
+            cards_html += f"""<div class="carousel-card status-secondary">
                 <h4>{bim}</h4>
-                <div style="color:#999; font-style:italic; padding: 20px 0;">Sem dados lançados</div>
+                <p style="color: #999;">Sem dados lançados.</p>
             </div>"""
-
+            
     cards_html += '</div>'
     st.markdown(cards_html, unsafe_allow_html=True)
-            
-    st.markdown("---")
-    st.subheader("Comparativo Aluno vs Turma")
     
-    t_aluno = df[df["nome_estudante"] == aluno_sel]["turma"].iloc[0]
-    df_turma = df[df["turma"] == t_aluno].groupby(["bimestre", "tipoindicador"])["Valor"].mean().reset_index()
-    df_turma["Serie"] = "Média Turma"
-    df_single = df[df["nome_estudante"] == aluno_sel].copy()
-    df_single["Serie"] = "Aluno"
+    # Gráfico Comparativo do Aluno (Um por indicador)
+    st.subheader("Desempenho por Indicador")
     
-    main_inds = ["Nota Global", "Percentual de Presenças", "AV1 – Nota Final", "AV2 – Nota Final", "AV3 – Nota Final"]
-    df_comp = pd.concat([df_turma, df_single[["bimestre", "tipoindicador", "Valor", "Serie"]]])
-    df_comp = df_comp[df_comp["tipoindicador"].isin(main_inds)]
+    # Filtrar apenas indicadores desejados para os gráficos
+    indicadores_chart = [c for c in INDICADORES_DESEJADOS if c in df_al.columns]
     
-    if not df_comp.empty:
-        fig_comp = px.line(df_comp, x="bimestre", y="Valor", color="Serie", facet_col="tipoindicador", facet_col_wrap=2, markers=True)
-        fig_comp.update_yaxes(matches=None) 
-        st.plotly_chart(fig_comp, use_container_width=True)
+    if indicadores_chart:
+        # Criar layout de colunas para os gráficos
+        cols = st.columns(2) # 2 gráficos por linha
+        for i, ind in enumerate(indicadores_chart):
+            df_ind = df_al[["bimestre", ind]].dropna()
+            if not df_ind.empty:
+                # Tentar converter para numérico se não for
+                try:
+                    df_ind[ind] = pd.to_numeric(df_ind[ind])
+                except:
+                    continue # Pula se não for numérico
+                
+                fig = px.bar(df_ind, x="bimestre", y=ind, title=ind, text_auto=True)
+                fig.update_layout(height=300)
+                cols[i % 2].plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Dados insuficientes para gerar o gráfico comparativo.")
+        st.info("Sem dados numéricos para gerar gráficos.")
 
 # --- ESTUDANTES EM ATENÇÃO ---
 elif page == "Estudantes em Atenção":
     st.header("⚠️ Estudantes em Atenção")
-    st.info("Critério: Nota Global < 10 OU Presença < 75%")
-    bim = st.selectbox("Bimestre", ["Todos"] + NIVEL_BIMESTRE)
     
-    dfr = df_larga.copy()
-    if bim != "Todos": dfr = dfr[dfr["bimestre"] == bim]
+    filtro_risco = st.multiselect("Critérios de Risco", 
+                                  ["Nota Global Baixa", "Muitas Faltas", "SDQ Anormal", "GAD-7 Grave"],
+                                  default=["Nota Global Baixa"])
     
-    if "Nota Global" in dfr.columns and "Percentual de Presenças" in dfr.columns:
-        mask = (dfr["Nota Global"] < 10) | (dfr["Percentual de Presenças"] < 75)
-        st.dataframe(dfr[mask][["nome_estudante", "turma", "bimestre", "Nota Global", "Percentual de Presenças"]], use_container_width=True)
-    else:
-        st.warning("Colunas necessárias não encontradas.")
+    # Lógica de identificação de risco (simplificada)
+    # Aqui você pode expandir com regras mais complexas
+    
+    st.info("Funcionalidade em desenvolvimento. Exibindo tabela completa por enquanto.")
+    st.dataframe(df_larga)
 
 # --- BASE COMPLETA ---
 elif page == "Base Completa":
-    st.header("📚 Base de Dados Completa")
-    csv = df_larga.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Baixar Dados (CSV)", csv, 'cafelab_dados_completos.csv', 'text/csv')
-    st.dataframe(df_larga, use_container_width=True)
+    st.header("📂 Base de Dados Completa")
+    st.dataframe(df)
