@@ -420,9 +420,12 @@ def carregar_dados_v5():
         sh_ctx = client.open_by_key(ID_CONTEXTO)
         ws_ctx = sh_ctx.get_worksheet(0)
         df_ctx = pd.DataFrame(ws_ctx.get_all_records())
-    except:
+    except Exception as e:
+        st.warning(f"⚠️ Atenção: Não foi possível carregar a Planilha de Contexto (ID {ID_CONTEXTO}). Erro: {e}")
         if os.path.exists(ARQUIVO_CONTEXTO):
-            try: df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='utf-8')
+            try: 
+                df_ctx = pd.read_csv(ARQUIVO_CONTEXTO, encoding='utf-8')
+                st.info("Usando arquivo de contexto local (backup).")
             except: pass
     
     if not df_ctx.empty:
@@ -541,10 +544,11 @@ if page == "Agregado":
     with c3: bim_sel = st.selectbox("Bimestre", bims)
     
     # Identificar colunas de contexto (que não são as padrão)
-    cols_padrao = ["nome_estudante", "turma", "bimestre", "tipoindicador", "Valor", "chave_estudante", "indicador_cru", "sdq_total", "gad7_total", "sdq_total_cat", "gad7_total_cat"]
+    cols_padrao = ["nome_estudante", "turma", "bimestre", "tipoindicador", "Valor", "chave_estudante", "indicador_cru", "sdq_total", "gad7_total", "sdq_total_cat", "gad7_total_cat", "ano_letivo"]
     cols_contexto = [c for c in df.columns if c not in cols_padrao]
     # Filtra colunas que parecem ser metadados úteis (ex: genero, raca, etc)
-    cols_contexto = sorted([c for c in cols_contexto if df[c].nunique() < 20]) # Heurística: poucas categorias
+    # Aumentado limite para 50 para evitar sumir colunas com mais categorias
+    cols_contexto = sorted([c for c in cols_contexto if df[c].nunique() < 50]) 
     
     with c4: desagregar_por = st.selectbox("Desagregar por", ["Nenhum"] + cols_contexto)
     
