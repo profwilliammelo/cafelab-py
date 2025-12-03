@@ -6,3 +6,5 @@ gspread
 google-auth
 fpdf2
 matplotlib
+statsmodels
+statsmodels
