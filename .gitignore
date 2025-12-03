@@ -1,5 +1,6 @@
 # Secrets
 service_account.json
+credentials.json
 
 # Data
 dados_turmas_2025.csv
